@@ -5,11 +5,11 @@ from datetime import datetime
 from io import BytesIO
 
 st.set_page_config(page_title="USPS 地址生成工具", layout="wide")
-st.title("📦 USPS 地址批量生成工具（标准格式 + 电话提取 + 错误提示）")
+st.title("📦 USPS 地址批量生成工具（智能拆分 Apt、City、ZIP + 电话提取）")
 
 remarks_file = st.file_uploader("📤 上传包含“发货备注”和 Handle 的 CSV 文件", type="csv")
 
-# ✅ 州名映射（全称转缩写）
+# ✅ 州名映射表（全称转缩写）
 STATE_ABBR = {
     'alabama': 'AL', 'alaska': 'AK', 'arizona': 'AZ', 'arkansas': 'AR', 'california': 'CA',
     'colorado': 'CO', 'connecticut': 'CT', 'delaware': 'DE', 'florida': 'FL', 'georgia': 'GA',
@@ -28,7 +28,7 @@ def normalize_state(state_str):
     state_str = state_str.strip().lower()
     return STATE_ABBR.get(state_str, state_str.upper()[:2])
 
-# ✅ 智能解析“发货备注”
+# ✅ 智能解析发货备注
 def smart_parse_remark(remark, handle):
     first_name = last_name = handle
     addr1 = addr2 = city = state = zip_code = phone = ""
@@ -44,16 +44,16 @@ def smart_parse_remark(remark, handle):
         if phone_match:
             phone = phone_match.group(0)
 
-        # 🙋‍♀️ 姓名识别
+        # 🙋 姓名提取
         name_match = re.match(r'^([A-Z][a-zA-Z\-]+)\s+([A-Z][a-zA-Z\-\.]+)', lines[0])
         if name_match:
             first_name = name_match.group(1)
             last_name = name_match.group(2)
             lines = lines[1:]
 
-        # 🏙️ 城市/州/邮编识别（从后向前）
+        # 🏙️ 城市+州+ZIP 提取（限制不能包含街道）
         for i in reversed(range(len(lines))):
-            match = re.search(r'([A-Za-z\s\.]+),?\s*([A-Za-z]{2,})[,\s]+(?:United States)?\s*(\d{5})$', lines[i])
+            match = re.search(r'([A-Za-z\s]+?),\s*([A-Za-z]{2,})\s*(\d{5})$', lines[i])
             if match:
                 city = match.group(1).strip()
                 state = normalize_state(match.group(2))
@@ -63,7 +63,7 @@ def smart_parse_remark(remark, handle):
         else:
             error = "⚠️ 缺失城市/州/邮编"
 
-        # 🏠 地址行
+        # 🏠 地址识别
         for line in lines:
             if re.search(r'\d+', line):
                 if re.search(r'\b(apt|unit|ste|suite|#)\b', line.lower()):
@@ -139,7 +139,7 @@ def create_fixed_usps_template(n):
         '解析备注': [''] * n
     })
 
-# 🚀 主流程
+# 🚀 主程序
 if remarks_file:
     remarks_df = pd.read_csv(remarks_file)
     if '发货备注' not in remarks_df.columns or 'Handle' not in remarks_df.columns:
