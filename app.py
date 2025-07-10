@@ -4,10 +4,71 @@ import re
 from datetime import datetime
 from io import BytesIO
 
-st.set_page_config(page_title="USPS 批量地址工具", layout="wide")
-st.title("📦 USPS 地址批量生成工具（标准格式支持 Apt、City、ZIP 拆分）")
+st.set_page_config(page_title="USPS 智能地址生成工具", layout="wide")
+st.title("📦 USPS 智能地址批量生成工具（含电话提取 + 错误提示 + 州补全）")
 
 remarks_file = st.file_uploader("📤 上传包含“发货备注”和 Handle 的 CSV 文件", type="csv")
+
+# 州名全称映射为缩写
+STATE_ABBR = {
+    'alabama': 'AL', 'alaska': 'AK', 'arizona': 'AZ', 'arkansas': 'AR', 'california': 'CA',
+    'colorado': 'CO', 'connecticut': 'CT', 'delaware': 'DE', 'florida': 'FL', 'georgia': 'GA',
+    'hawaii': 'HI', 'idaho': 'ID', 'illinois': 'IL', 'indiana': 'IN', 'iowa': 'IA',
+    'kansas': 'KS', 'kentucky': 'KY', 'louisiana': 'LA', 'maine': 'ME', 'maryland': 'MD',
+    'massachusetts': 'MA', 'michigan': 'MI', 'minnesota': 'MN', 'mississippi': 'MS', 'missouri': 'MO',
+    'montana': 'MT', 'nebraska': 'NE', 'nevada': 'NV', 'new hampshire': 'NH', 'new jersey': 'NJ',
+    'new mexico': 'NM', 'new york': 'NY', 'north carolina': 'NC', 'north dakota': 'ND',
+    'ohio': 'OH', 'oklahoma': 'OK', 'oregon': 'OR', 'pennsylvania': 'PA', 'rhode island': 'RI',
+    'south carolina': 'SC', 'south dakota': 'SD', 'tennessee': 'TN', 'texas': 'TX', 'utah': 'UT',
+    'vermont': 'VT', 'virginia': 'VA', 'washington': 'WA', 'west virginia': 'WV',
+    'wisconsin': 'WI', 'wyoming': 'WY'
+}
+
+def normalize_state(state_str):
+    state_str = state_str.strip().lower()
+    return STATE_ABBR.get(state_str, state_str.upper()[:2])
+
+# 智能解析发货备注
+def smart_parse_remark(remark, handle):
+    first_name = last_name = handle
+    addr1 = addr2 = city = state = zip_code = phone = ""
+    error = ""
+
+    if isinstance(remark, str):
+        remark = remark.replace('\r', '\n')
+        lines = [line.strip() for line in remark.split('\n') if line.strip()]
+        combined = " ".join(lines)
+
+        # 手机号
+        phone_match = re.search(r'\+?1?[-\s\.]?\(?\d{3}\)?[-\s\.]?\d{3}[-\s\.]?\d{4}', combined)
+        if phone_match:
+            phone = phone_match.group(0)
+
+        # 姓名
+        name_match = re.match(r'^([A-Z][a-zA-Z\-]+)\s+([A-Z][a-zA-Z\-\.]+)', lines[0])
+        if name_match:
+            first_name = name_match.group(1)
+            last_name = name_match.group(2)
+            lines = lines[1:]
+
+        # 地址
+        for line in lines:
+            if re.search(r'\d+', line):
+                if re.search(r'\b(apt|unit|ste|suite|#)\b', line.lower()):
+                    addr2 = line
+                elif not addr1:
+                    addr1 = line
+
+        # 城市/州/邮编
+        city_state_zip = re.search(r'([A-Za-z\s\.]+),?\s*([A-Za-z]+)[,\s]+(?:United States)?[\s,]*(\d{5})', combined)
+        if city_state_zip:
+            city = city_state_zip.group(1).strip()
+            state = normalize_state(city_state_zip.group(2))
+            zip_code = city_state_zip.group(3)
+        else:
+            error = "⚠️ 缺失城市/州/邮编"
+
+    return pd.Series([first_name, last_name, addr1, addr2, city, state, zip_code, phone, error])
 
 # 固定模板结构
 def create_fixed_usps_template(n):
@@ -68,58 +129,18 @@ def create_fixed_usps_template(n):
         'License #': [''] * n,
         'Certificate #': [''] * n,
         'Invoice #': [''] * n,
+        '解析备注': [''] * n
     })
-
-# 改进的地址解析函数
-def parse_usps_remark(remark, handle):
-    first_name = last_name = handle
-    addr_line1 = addr_line2 = city = state = zip_code = ""
-
-    if isinstance(remark, str):
-        lines = [line.strip() for line in remark.strip().split('\n') if line.strip()]
-
-        # 姓名提取
-        if len(lines) > 0 and re.match(r'^[A-Za-z\\-]+\\s+[A-Za-z\\-\\.]+$', lines[0]):
-            parts = lines[0].split(' ', 1)
-            first_name, last_name = parts[0], parts[1]
-            lines = lines[1:]
-
-        # 地址提取
-        for i, line in enumerate(lines):
-            if re.search(r'\\d+', line):
-                if re.search(r'\\b(apt|unit|ste|suite|#)\\b', line.lower()):
-                    addr_line2 = line
-                else:
-                    addr_line1 = line
-                lines.pop(i)
-                break
-
-        # 公寓行提取（剩余行中找 apt/unit/ste）
-        for i, line in enumerate(lines):
-            if re.search(r'\\b(apt|unit|ste|suite|#)\\b', line.lower()):
-                addr_line2 = line
-                break
-
-        # 城市、州、邮编提取
-        for line in lines:
-            match = re.search(r'([A-Za-z\\s\\.]+),\\s*([A-Z]{2})\\s+(\\d{5})', line)
-            if match:
-                city = match.group(1).strip()
-                state = match.group(2).strip()
-                zip_code = match.group(3).strip()
-                break
-
-    return pd.Series([first_name, last_name, addr_line1, addr_line2, city, state, zip_code])
 
 # 主程序逻辑
 if remarks_file:
     remarks_df = pd.read_csv(remarks_file)
     if '发货备注' not in remarks_df.columns or 'Handle' not in remarks_df.columns:
-        st.error("❌ 请确保文件包含列：'发货备注' 和 'Handle'")
+        st.error("❌ CSV 文件必须包含列 '发货备注' 和 'Handle'")
     else:
         st.success("✅ 文件上传成功，正在解析地址...")
 
-        parsed_df = remarks_df.apply(lambda row: parse_usps_remark(row['发货备注'], row['Handle']), axis=1)
+        parsed_df = remarks_df.apply(lambda row: smart_parse_remark(row['发货备注'], row['Handle']), axis=1)
         parsed_df.columns = [
             'Recipient First Name',
             'Recipient Last Name',
@@ -127,18 +148,19 @@ if remarks_file:
             'Recipient Address Line 2',
             'Recipient Address Town/City',
             'Recipient State',
-            'Recipient ZIP Code'
+            'Recipient ZIP Code',
+            'Recipient Phone',
+            '解析备注'
         ]
 
         n = len(parsed_df)
-        filled_df = create_fixed_usps_template(n)
-        filled_df.update(parsed_df)
+        result_df = create_fixed_usps_template(n)
+        result_df.update(parsed_df)
+        result_df['Shipping Date'] = datetime.today().strftime("%Y-%m-%d")
+        result_df['Reference ID'] = [f'R{100001 + i}' for i in range(n)]
+        result_df['Reference ID 2'] = [f'RR{100001 + i}' for i in range(n)]
 
-        filled_df['Shipping Date'] = datetime.today().strftime("%Y-%m-%d")
-        filled_df['Reference ID'] = [f'R{100001 + i}' for i in range(n)]
-        filled_df['Reference ID 2'] = [f'RR{100001 + i}' for i in range(n)]
-
-        st.dataframe(filled_df.head(10))
+        st.dataframe(result_df.head(10))
 
         def convert_df(df):
             output = BytesIO()
@@ -147,7 +169,7 @@ if remarks_file:
 
         st.download_button(
             label="📥 下载 USPS 地址文件",
-            data=convert_df(filled_df),
-            file_name="usps_addresses.csv",
+            data=convert_df(result_df),
+            file_name="usps_smart_filled.csv",
             mime="text/csv"
         )
