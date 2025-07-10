@@ -4,12 +4,12 @@ import re
 from datetime import datetime
 from io import BytesIO
 
-st.set_page_config(page_title="USPS 批量生成工具", layout="wide")
-st.title("📦 USPS 地址批量生成工具（固定模板 + 智能地址解析）")
+st.set_page_config(page_title="USPS 批量地址工具", layout="wide")
+st.title("📦 USPS 地址批量生成工具（标准格式支持 Apt、City、ZIP 拆分）")
 
-remarks_file = st.file_uploader("📤 上传包含“发货备注”与 Handle 的 CSV 文件", type="csv")
+remarks_file = st.file_uploader("📤 上传包含“发货备注”和 Handle 的 CSV 文件", type="csv")
 
-# 固定 USPS 模板结构
+# 固定模板结构
 def create_fixed_usps_template(n):
     return pd.DataFrame({
         'Reference ID': [''] * n,
@@ -70,36 +70,48 @@ def create_fixed_usps_template(n):
         'Invoice #': [''] * n,
     })
 
-# 地址解析函数
-def improved_parse_remark(remark, handle):
+# 改进的地址解析函数
+def parse_usps_remark(remark, handle):
     first_name = last_name = handle
-    address1 = address2 = city = state = zip_code = ""
+    addr_line1 = addr_line2 = city = state = zip_code = ""
 
     if isinstance(remark, str):
         lines = [line.strip() for line in remark.strip().split('\n') if line.strip()]
-        if len(lines) >= 1 and re.match(r'^[A-Za-z\-]+ [A-Za-z\-\.]+$', lines[0]):
-            name_parts = lines[0].split(' ', 1)
-            first_name = name_parts[0].strip()
-            last_name = name_parts[1].strip()
+
+        # 姓名提取
+        if len(lines) > 0 and re.match(r'^[A-Za-z\\-]+\\s+[A-Za-z\\-\\.]+$', lines[0]):
+            parts = lines[0].split(' ', 1)
+            first_name, last_name = parts[0], parts[1]
             lines = lines[1:]
 
-        for line in lines:
-            if re.search(r'\d+', line):
-                address1 = line
-                lines.remove(line)
+        # 地址提取
+        for i, line in enumerate(lines):
+            if re.search(r'\\d+', line):
+                if re.search(r'\\b(apt|unit|ste|suite|#)\\b', line.lower()):
+                    addr_line2 = line
+                else:
+                    addr_line1 = line
+                lines.pop(i)
                 break
 
+        # 公寓行提取（剩余行中找 apt/unit/ste）
+        for i, line in enumerate(lines):
+            if re.search(r'\\b(apt|unit|ste|suite|#)\\b', line.lower()):
+                addr_line2 = line
+                break
+
+        # 城市、州、邮编提取
         for line in lines:
-            match = re.search(r'([A-Za-z\s\.]+),\s*([A-Z]{2})\s+(\d{5})', line)
+            match = re.search(r'([A-Za-z\\s\\.]+),\\s*([A-Z]{2})\\s+(\\d{5})', line)
             if match:
                 city = match.group(1).strip()
                 state = match.group(2).strip()
                 zip_code = match.group(3).strip()
                 break
 
-    return pd.Series([first_name, last_name, address1, address2, city, state, zip_code])
+    return pd.Series([first_name, last_name, addr_line1, addr_line2, city, state, zip_code])
 
-# 主逻辑
+# 主程序逻辑
 if remarks_file:
     remarks_df = pd.read_csv(remarks_file)
     if '发货备注' not in remarks_df.columns or 'Handle' not in remarks_df.columns:
@@ -107,7 +119,7 @@ if remarks_file:
     else:
         st.success("✅ 文件上传成功，正在解析地址...")
 
-        parsed_df = remarks_df.apply(lambda row: improved_parse_remark(row['发货备注'], row['Handle']), axis=1)
+        parsed_df = remarks_df.apply(lambda row: parse_usps_remark(row['发货备注'], row['Handle']), axis=1)
         parsed_df.columns = [
             'Recipient First Name',
             'Recipient Last Name',
@@ -134,8 +146,8 @@ if remarks_file:
             return output.getvalue()
 
         st.download_button(
-            label="📥 下载生成的 USPS 文件",
+            label="📥 下载 USPS 地址文件",
             data=convert_df(filled_df),
-            file_name="usps_filled.csv",
+            file_name="usps_addresses.csv",
             mime="text/csv"
         )
