@@ -4,12 +4,12 @@ import re
 from datetime import datetime
 from io import BytesIO
 
-st.set_page_config(page_title="USPS 批量发货工具", layout="wide")
-st.title("📦 USPS 地址批量生成工具（固定模板）")
+st.set_page_config(page_title="USPS 批量生成工具", layout="wide")
+st.title("📦 USPS 地址批量生成工具（固定模板 + 智能地址解析）")
 
 remarks_file = st.file_uploader("📤 上传包含“发货备注”与 Handle 的 CSV 文件", type="csv")
 
-# ========== 固定 USPS 模板结构 ==========
+# 固定 USPS 模板结构
 def create_fixed_usps_template(n):
     return pd.DataFrame({
         'Reference ID': [''] * n,
@@ -22,17 +22,17 @@ def create_fixed_usps_template(n):
         'Item Value': [100] * n,
         'HS Tariff #': [''] * n,
         'Country of Origin': ['US'] * n,
-        'Sender First Name': ['Chenhao'] * n,
+        'Sender First Name': ['Ava'] * n,
         'Sender Middle Initial': [''] * n,
-        'Sender Last Name': ['Fan'] * n,
+        'Sender Last Name': ['Everly'] * n,
         'Sender Company/Org Name': ['ColorFour LLC'] * n,
-        'Sender Address Line 1': ['123 Downtown Street'] * n,
+        'Sender Address Line 1': ['718 S Hill St'] * n,
         'Sender Address Line 2': [''] * n,
         'Sender Address Line 3': [''] * n,
         'Sender Address Town/City': ['Los Angeles'] * n,
         'Sender State': ['CA'] * n,
         'Sender Country': ['US'] * n,
-        'Sender ZIP Code': ['90017'] * n,
+        'Sender ZIP Code': ['90014'] * n,
         'Sender Urbanization Code': [''] * n,
         'Ship From Another ZIP Code': [''] * n,
         'Sender Email': ['support@colorfour.com'] * n,
@@ -70,45 +70,45 @@ def create_fixed_usps_template(n):
         'Invoice #': [''] * n,
     })
 
-# ========== 发货备注解析函数 ==========
-def parse_remark(remark, handle):
+# 地址解析函数
+def improved_parse_remark(remark, handle):
     first_name = last_name = handle
     address1 = address2 = city = state = zip_code = ""
 
     if isinstance(remark, str):
-        parts = remark.strip().split('\n')
-        parts = [p.strip() for p in parts if p.strip()]
-        name_pattern = re.compile(r'^[A-Za-z]+\\s+[A-Za-z]+$')
+        lines = [line.strip() for line in remark.strip().split('\n') if line.strip()]
+        if len(lines) >= 1 and re.match(r'^[A-Za-z\-]+ [A-Za-z\-\.]+$', lines[0]):
+            name_parts = lines[0].split(' ', 1)
+            first_name = name_parts[0].strip()
+            last_name = name_parts[1].strip()
+            lines = lines[1:]
 
-        for part in parts:
-            if name_pattern.match(part):
-                first_name, last_name = part.split(' ', 1)
+        for line in lines:
+            if re.search(r'\d+', line):
+                address1 = line
+                lines.remove(line)
                 break
 
-        city_zip_match = re.search(r'([A-Za-z\\s]+),?\\s*([A-Z]{2})\\s+(\\d{5})', remark)
-        if city_zip_match:
-            city = city_zip_match.group(1).strip()
-            state = city_zip_match.group(2)
-            zip_code = city_zip_match.group(3)
-
-        address_lines = [line for line in parts if not name_pattern.match(line) and not re.search(r'\\d{5}', line)]
-        if len(address_lines) >= 1:
-            address1 = address_lines[0]
-        if len(address_lines) >= 2:
-            address2 = address_lines[1]
+        for line in lines:
+            match = re.search(r'([A-Za-z\s\.]+),\s*([A-Z]{2})\s+(\d{5})', line)
+            if match:
+                city = match.group(1).strip()
+                state = match.group(2).strip()
+                zip_code = match.group(3).strip()
+                break
 
     return pd.Series([first_name, last_name, address1, address2, city, state, zip_code])
 
-# ========== 文件上传后处理 ==========
+# 主逻辑
 if remarks_file:
     remarks_df = pd.read_csv(remarks_file)
     if '发货备注' not in remarks_df.columns or 'Handle' not in remarks_df.columns:
         st.error("❌ 请确保文件包含列：'发货备注' 和 'Handle'")
     else:
-        st.success("📄 文件上传成功，正在解析地址信息...")
+        st.success("✅ 文件上传成功，正在解析地址...")
 
-        parsed_data = remarks_df.apply(lambda row: parse_remark(row['发货备注'], row['Handle']), axis=1)
-        parsed_data.columns = [
+        parsed_df = remarks_df.apply(lambda row: improved_parse_remark(row['发货备注'], row['Handle']), axis=1)
+        parsed_df.columns = [
             'Recipient First Name',
             'Recipient Last Name',
             'Recipient Address Line 1',
@@ -118,17 +118,15 @@ if remarks_file:
             'Recipient ZIP Code'
         ]
 
-        # 创建 USPS 模板并填入
-        n = len(remarks_df)
-        usps_df = create_fixed_usps_template(n)
-        usps_df.update(parsed_data)
+        n = len(parsed_df)
+        filled_df = create_fixed_usps_template(n)
+        filled_df.update(parsed_df)
 
-        today_str = datetime.today().strftime("%Y-%m-%d")
-        usps_df['Shipping Date'] = today_str
-        usps_df['Reference ID'] = [f'R{100001 + i}' for i in range(n)]
-        usps_df['Reference ID 2'] = [f'RR{100001 + i}' for i in range(n)]
+        filled_df['Shipping Date'] = datetime.today().strftime("%Y-%m-%d")
+        filled_df['Reference ID'] = [f'R{100001 + i}' for i in range(n)]
+        filled_df['Reference ID 2'] = [f'RR{100001 + i}' for i in range(n)]
 
-        st.dataframe(usps_df.head(10))
+        st.dataframe(filled_df.head(10))
 
         def convert_df(df):
             output = BytesIO()
@@ -137,7 +135,7 @@ if remarks_file:
 
         st.download_button(
             label="📥 下载生成的 USPS 文件",
-            data=convert_df(usps_df),
+            data=convert_df(filled_df),
             file_name="usps_filled.csv",
             mime="text/csv"
         )
