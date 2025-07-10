@@ -3,25 +3,11 @@ import pandas as pd
 import re
 import datetime
 
-# --- 州缩写映射表 ---
-STATE_ABBR = {
-    'alabama': 'AL', 'alaska': 'AK', 'arizona': 'AZ', 'arkansas': 'AR', 'california': 'CA',
-    'colorado': 'CO', 'connecticut': 'CT', 'delaware': 'DE', 'florida': 'FL', 'georgia': 'GA',
-    'hawaii': 'HI', 'idaho': 'ID', 'illinois': 'IL', 'indiana': 'IN', 'iowa': 'IA',
-    'kansas': 'KS', 'kentucky': 'KY', 'louisiana': 'LA', 'maine': 'ME', 'maryland': 'MD',
-    'massachusetts': 'MA', 'michigan': 'MI', 'minnesota': 'MN', 'mississippi': 'MS', 'missouri': 'MO',
-    'montana': 'MT', 'nebraska': 'NE', 'nevada': 'NV', 'new hampshire': 'NH', 'new jersey': 'NJ',
-    'new mexico': 'NM', 'new york': 'NY', 'north carolina': 'NC', 'north dakota': 'ND',
-    'ohio': 'OH', 'oklahoma': 'OK', 'oregon': 'OR', 'pennsylvania': 'PA', 'rhode island': 'RI',
-    'south carolina': 'SC', 'south dakota': 'SD', 'tennessee': 'TN', 'texas': 'TX', 'utah': 'UT',
-    'vermont': 'VT', 'virginia': 'VA', 'washington': 'WA', 'west virginia': 'WV',
-    'wisconsin': 'WI', 'wyoming': 'WY'
-}
-ALL_STATES = {**STATE_ABBR, **{v: v for v in STATE_ABBR.values()}}
-
-# --- 智能解析函数 ---
+# === 精确地址解析函数 ===
 def extract_address_parts(text, handle=""):
-    lines = [l.strip() for l in text.strip().replace('\r', '\n').split('\n') if l.strip()]
+    lines = [l.strip() for l in text.strip().split("\n") if l.strip()]
+    full_text = " ".join(lines)
+
     result = {
         'Recipient First Name': handle,
         'Recipient Last Name': handle,
@@ -32,60 +18,62 @@ def extract_address_parts(text, handle=""):
         'Recipient State': '',
         'Recipient ZIP Code': '',
         'Recipient Phone': '',
+        'Recipient Email': '',
+        'Recipient Country': 'US',
         '解析备注错误': ''
     }
 
-    # 手机号
-    combined = " ".join(lines)
-    phone_match = re.search(r'(\+?1?[-\s\.]?\(?\d{3}\)?[-\s\.]?\d{3}[-\s\.]?\d{4})', combined)
+    # 手机号识别
+    phone_match = re.search(r'(\+?1?[-\s.]?\(?\d{3}\)?[-\s.]?\d{3}[-\s.]?\d{4})', full_text)
     if phone_match:
-        result['Recipient Phone'] = phone_match.group(1)
+        result['Recipient Phone'] = phone_match.group(1).strip()
 
-    # 姓名（第一行）
+    # 城市、州、邮编识别（倒序）
+    zip_state_city_match = re.search(r'(.+?),\s*([A-Za-z]{2})[, ]+\s*(\d{5})(?!\d)', full_text)
+    if zip_state_city_match:
+        city = zip_state_city_match.group(1).strip().title()
+        state = zip_state_city_match.group(2).strip().upper()
+        zip_code = zip_state_city_match.group(3).zfill(5)
+
+        result['Recipient Address Town/City'] = city
+        result['Recipient State'] = state
+        result['Recipient ZIP Code'] = zip_code
+
+        # 城市之前为地址部分
+        address_section = full_text[:zip_state_city_match.start()].strip()
+
+        # Line 2：有 Apt/Unit/Suite
+        apt_match = re.search(r'(.*?)(?:\s+)?(apt|unit|suite|#)[\s\-\.]*\w*', address_section, re.IGNORECASE)
+        if apt_match:
+            result['Recipient Address Line 2'] = apt_match.group(0).strip()
+
+        # Line 1：数字+街道名结构
+        address1_match = re.search(r'\d{1,5}[^,\\n]*\s+(Street|St\.?|Rd\.?|Road|Ave\.?|Avenue|Blvd\.?|Drive|Dr\.?|Ln\.?|Way)', address_section, re.IGNORECASE)
+        if address1_match:
+            result['Recipient Address Line 1'] = address1_match.group(0).strip()
+        else:
+            result['Recipient Address Line 1'] = address_section
+    else:
+        result['解析备注错误'] += ' 城市/州/邮编解析失败；'
+
+    # 姓名识别（第一行）
     if lines:
-        name_parts = re.findall(r'\b[\w\-]+\b', lines[0])
+        name_line = lines[0]
+        name_parts = re.findall(r'\b[\w\-]+\b', name_line)
         if len(name_parts) >= 2:
             result['Recipient First Name'] = name_parts[0]
             result['Recipient Last Name'] = name_parts[-1]
         else:
-            result['Recipient First Name'] = result['Recipient Last Name'] = lines[0]
-
-    # 查找城市/州/ZIP结尾片段，并分割前面为街道
-    city_state_zip = None
-    for idx, line in enumerate(reversed(lines)):
-        match = re.search(r'([A-Za-z .\-]+),?\s*([A-Za-z]{2}|[A-Za-z .\-]+)\s+(\d{5})(?!\d)', line)
-        if match:
-            city = match.group(1).strip().title()
-            state_raw = match.group(2).strip().lower()
-            zip_code = match.group(3).strip()
-            state = ALL_STATES.get(state_raw.lower(), state_raw.upper()[:2])
-            result['Recipient Address Town/City'] = city
-            result['Recipient State'] = state
-            result['Recipient ZIP Code'] = zip_code
-            city_state_zip = line
-            break
-
-    # 提取 address1、address2
-    addr_lines = []
-    for line in lines[1:]:
-        # 跳过已被识别为 city/state/zip 的行
-        if line == city_state_zip:
-            continue
-        if re.search(r'\b(apt|unit|suite|ste|#)\b', line.lower()):
-            result['Recipient Address Line 2'] = line
-        elif re.search(r'\d+', line):
-            addr_lines.append(line)
-    if addr_lines:
-        result['Recipient Address Line 1'] = addr_lines[0]
+            result['Recipient First Name'] = result['Recipient Last Name'] = handle
 
     return result
 
-# --- USPS 模板 ---
+# === USPS 模板构造 ===
 def create_fixed_usps_template(n):
     return pd.DataFrame({
-        'Reference ID': [f"R{i+1}" for i in range(n)],
-        'Reference ID 2': [f"RR{i+1}" for i in range(n)],
-        'Shipping Date': [datetime.date.today().strftime('%Y-%m-%d')] * n,
+        'Reference ID': [f"{i+1}" for i in range(n)],
+        'Reference ID 2': [f"{i+8}" for i in range(n)],
+        'Shipping Date': [datetime.date.today().strftime('%-m/%-d/%y')] * n,
         'Item Description': ['PressOnNails'] * n,
         'Item Quantity': [1] * n,
         'Item Weight (lb)': [0.25] * n,
@@ -98,7 +86,7 @@ def create_fixed_usps_template(n):
         'Sender Last Name': ['Everly'] * n,
         'Sender Company/Org Name': ['ColorFour LLC'] * n,
         'Sender Address Line 1': ['718 S Hill St'] * n,
-        'Sender Address Line 2': [''] * n,
+        'Sender Address Line 2': ['STE310'] * n,
         'Sender Address Line 3': [''] * n,
         'Sender Address Town/City': ['Los Angeles'] * n,
         'Sender State': ['CA'] * n,
@@ -106,7 +94,7 @@ def create_fixed_usps_template(n):
         'Sender ZIP Code': ['90014'] * n,
         'Sender Urbanization Code': [''] * n,
         'Ship From Another ZIP Code': [''] * n,
-        'Sender Email': ['support@colorfour.com'] * n,
+        'Sender Email': ['contact@nailvesta.com'] * n,
         'Sender Cell Phone': ['1234567890'] * n,
         'Recipient Country': ['US'] * n,
         'Recipient First Name': [''] * n,
@@ -141,21 +129,25 @@ def create_fixed_usps_template(n):
         'Invoice #': [''] * n,
     })
 
-# --- Streamlit 主程序 ---
-st.title("USPS 地址批量解析工具（严格格式修复版）")
-uploaded = st.file_uploader("上传水单 CSV（含 '发货备注' 和 Handle）", type="csv")
+# === Streamlit App ===
+st.title("📦 USPS 标签生成器（精确模板匹配）")
+
+uploaded = st.file_uploader("📤 上传水单文件（包含“发货备注”列）", type="csv")
 
 if uploaded:
     df = pd.read_csv(uploaded)
-    if '发货备注' not in df.columns or 'Handle' not in df.columns:
-        st.error("缺少 '发货备注' 或 'Handle' 列")
+    if '发货备注' not in df.columns:
+        st.error("❌ 缺少“发货备注”列，请检查 CSV 文件格式。")
     else:
-        parsed = df.apply(lambda row: extract_address_parts(row['发货备注'], str(row['Handle'])), axis=1)
+        parsed = df['发货备注'].fillna('').apply(lambda x: extract_address_parts(x))
         parsed_df = pd.DataFrame(list(parsed))
-        usps_df = create_fixed_usps_template(len(df))
+        usps_df = create_fixed_usps_template(len(parsed_df))
+
         for col in parsed_df.columns:
             if col in usps_df.columns:
                 usps_df[col] = parsed_df[col]
-        st.success("🎉 地址识别成功，结果如下：")
+
+        st.success("✅ 地址已解析并填入 USPS 模板。")
         st.dataframe(usps_df)
-        st.download_button("📥 下载 USPS 地址文件", usps_df.to_csv(index=False).encode('utf-8-sig'), "usps_filled.csv")
+
+        st.download_button("📥 下载 USPS 标签 CSV", usps_df.to_csv(index=False).encode('utf-8-sig'), "usps_filled.csv")
